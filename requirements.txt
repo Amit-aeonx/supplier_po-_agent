@@ -1,0 +1,11 @@
+streamlit
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+python-dotenv
+langchain
+langchain-aws
+boto3
+pydantic
+pandas

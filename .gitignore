@@ -1,0 +1,48 @@
+# Environment variables (contains passwords and AWS keys)
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite
+*.db
+
+# Test files (already deleted but in case they're recreated)
+test_*.py
+debug_*.py
+check_*.py
+verify_*.py
+
+# Output files
+output*.txt
+*.txt
+
+# Keep only essential .txt files
+!requirements.txt
+
+# Markdown docs (keep README)
+!README.md
+
+# Temporary files
+*.tmp
+*.bak
