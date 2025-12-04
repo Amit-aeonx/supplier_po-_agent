@@ -1,255 +1,425 @@
-from typing import Dict, List, Optional
 import json
-import datetime
-from backend.tools import POTools
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 from backend.llm import get_llm
+from backend.tools import POTools
+
+from backend.sql_agent import SQLAgent
 
 class POAgent:
-    """Conversational agent for PO creation with Bedrock and Fallbacks"""
-    
     def __init__(self):
-        self.tools = POTools()
         self.llm = get_llm()
+        self.tools = POTools()
+        self.sql_agent = SQLAgent()
         self.state = {
             "step": "start",
-            "extracted_data": {},
-            "validation_status": {},
-            "final_payload": {}
+            "po_mode": "independent", # Default to independent
+            "header": {
+                "po_date": datetime.now().strftime("%Y-%m-%d"),
+                "validity_date": None,
+                "po_type": None,
+                "supplier": None,
+                "currency": None
+            },
+            "org_data": {
+                "plant": None,
+                "purchase_org": None,
+                "purchase_group": None
+            },
+            "line_items": [],
+            "current_item": {},
+            "history": []
         }
-    
-    def process_message(self, user_input: str) -> str:
-        """Process user message through the 7-step flow"""
-        
-        step = self.state["step"]
-        
-        # STEP 1: User Input & Extraction (if starting)
-        if step == "start":
-            return self._step_extraction(user_input)
-        
-        # Handle validation questions
-        elif step == "validating_supplier":
-            return self._handle_supplier_selection(user_input)
-            
-        elif step == "validating_plant":
-            return self._handle_plant_selection(user_input)
-            
-        elif step == "validating_material":
-            return self._handle_material_selection(user_input)
-            
-        elif step == "validating_date":
-             return self._handle_date_correction(user_input)
-             
-        elif step == "confirmation":
-            return self._handle_confirmation(user_input)
-            
-        else:
-            return "I'm lost. Let's start over. Tell me what you want to order."
 
-    def _step_extraction(self, user_input: str) -> str:
-        """Step 2: LLM Extraction"""
+    def extract_entities(self, user_input: str) -> Dict:
+        """Extract PO entities from natural language using Bedrock"""
         prompt = f"""
-        Extract the following fields from the user's request into a JSON object:
-        - supplier_name (string or null)
-        - plant_name (string or null)
-        - material_name (string or null)
-        - quantity (number or null)
-        - price (number or null)
-        - delivery_date (YYYY-MM-DD or null)
+        Extract Purchase Order entities from the user input.
+        Return JSON ONLY. No markdown.
         
-        User Request: "{user_input}"
+        Fields to extract (if present):
+        - intent: "create_po" or "question"
+        - supplier: name of supplier
+        - plant: name of plant
+        - material: name of material
+        - quantity: number
+        - po_type: "Standard", "Service", etc.
         
-        Return ONLY the JSON.
+        User Input: "{user_input}"
+        
+        Example JSON:
+        {{
+            "intent": "create_po",
+            "supplier": "Avians",
+            "plant": "Noida",
+            "material": "MS Pipe",
+            "quantity": "50"
+        }}
         """
         
         try:
-            response = self.llm.invoke(prompt)
-            # Clean up response to get just JSON
-            json_str = response.strip()
-            if "```json" in json_str:
-                json_str = json_str.split("```json")[1].split("```")[0]
-            elif "{" not in json_str:
-                return "I couldn't understand that. Please try again."
-                
-            data = json.loads(json_str)
-            self.state["extracted_data"] = data
-            print(f"[DEBUG] Extracted: {data}")
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 300,
+                "messages": [{"role": "user", "content": prompt}]
+            })
             
-            # Move to validation
-            return self._step_validation()
+            response = self.sql_agent.bedrock.invoke_model(
+                modelId=self.sql_agent.model_id,
+                body=body
+            )
             
+            response_body = json.loads(response.get('body').read())
+            text_resp = response_body['content'][0]['text'].strip()
+            # Cleanup json
+            text_resp = text_resp.replace("```json", "").replace("```", "").strip()
+            return json.loads(text_resp)
         except Exception as e:
-            print(f"[ERROR] Extraction failed: {e}")
-            return "Sorry, I had trouble understanding that. Could you rephrase?"
+            print(f"[ERROR] extract_entities: {e}")
+            return {}
 
-    def _step_validation(self) -> str:
-        """Step 3: Validation Block"""
-        data = self.state["extracted_data"]
+    def process_message(self, user_input: str) -> str:
+        """Process user message and return bot response"""
         
-        # 3.1 Supplier Validation
-        if not self.state.get("supplier_valid"):
-            if not data.get("supplier_name"):
-                return "I need a supplier name. Who is this order for?"
-            
-            suppliers = self.tools.search_suppliers(data["supplier_name"])
-            
-            if len(suppliers) == 0:
-                return f"I couldn't find a supplier named '{data['supplier_name']}'. Please check the name."
-            elif len(suppliers) == 1:
-                self.state["final_payload"]["supplier_id"] = suppliers[0]["id"]
-                self.state["final_payload"]["supplier_name"] = suppliers[0]["name"]
-                self.state["supplier_valid"] = True
-            else:
-                self.state["step"] = "validating_supplier"
-                self.state["supplier_options"] = suppliers
-                options = "\n".join([f"{i+1}. {s['name']}" for i, s in enumerate(suppliers)])
-                return f"I found multiple suppliers. Please choose one:\n{options}"
+        # Global Question Detection (Escape Hatch)
+        # If the user asks a question, answer it and repeat the current step's prompt
+        question_indicators = ["how", "what", "show", "list", "give", "count", "tell", "where"]
+        is_question = any(user_input.lower().startswith(w) for w in question_indicators) or "?" in user_input
+        
+        if is_question and self.state["step"] != "start":
+            answer = self.sql_agent.answer_question(user_input)
+            if "couldn't generate" not in answer:
+                # Return answer + reminder of current step
+                current_prompt = self._get_current_step_prompt()
+                return f"{answer}\n\n---\n(Resuming...)\n{current_prompt}"
 
-        # 3.2 Plant Validation
-        if not self.state.get("plant_valid"):
-            if not data.get("plant_name"):
-                # Default or ask? Let's ask.
-                return "Which plant is this for?"
+        step = self.state["step"]
+        
+        # --- STEP 1: START & HEADER ---
+        if step == "start":
+            # 1. Extract Entities
+            entities = self.extract_entities(user_input)
+            print(f"[DEBUG] Extracted: {entities}")
+            
+            if entities.get("intent") == "question":
+                 return self.sql_agent.answer_question(user_input)
+            
+            if entities.get("intent") == "create_po" or any(w in user_input.lower() for w in ["create", "start", "po"]):
+                self.state["step"] = "header_supplier"
+                self.state["extracted"] = entities # Store for later steps
                 
-            plants = self.tools.search_plants(data["plant_name"])
-            
-            if len(plants) == 0:
-                return f"I couldn't find a plant named '{data['plant_name']}'."
-            elif len(plants) == 1:
-                self.state["final_payload"]["plant_id"] = plants[0]["id"]
-                self.state["final_payload"]["plant_name"] = plants[0]["name"]
-                self.state["plant_valid"] = True
-            else:
-                self.state["step"] = "validating_plant"
-                self.state["plant_options"] = plants
-                options = "\n".join([f"{i+1}. {p['name']}" for i, p in enumerate(plants)])
-                return f"I found multiple plants. Please choose one:\n{options}"
+                # Auto-fill Supplier if found
+                if entities.get("supplier"):
+                    suppliers = self.tools.search_suppliers(entities["supplier"])
+                    if len(suppliers) == 1:
+                        self.state["header"]["supplier"] = suppliers[0]
+                        self.state["step"] = "header_type" # Skip to next
+                        
+                # Auto-fill PO Type if found
+                if entities.get("po_type"):
+                     # Simple validation could be added here
+                     self.state["header"]["po_type"] = entities["po_type"]
+                     if self.state["step"] == "header_type":
+                         self.state["step"] = "header_currency"
 
-        # 3.3 Material Validation
-        if not self.state.get("material_valid"):
-            if not data.get("material_name"):
-                return "What material do you want to order?"
+                # If we skipped supplier, return next prompt
+                if self.state["step"] == "header_type":
+                    return f"Supplier **{self.state['header']['supplier']['name']}** selected.\n\nSelect **PO Type**:"
+                elif self.state["step"] == "header_currency":
+                     return f"Supplier **{self.state['header']['supplier']['name']}** and Type **{self.state['header']['po_type']}** selected.\n\nSelect **Currency**:"
                 
-            materials = self.tools.search_materials(data["material_name"])
-            
-            if len(materials) == 0:
-                return f"I couldn't find material '{data['material_name']}'."
-            elif len(materials) == 1:
-                self.state["final_payload"]["material_name"] = materials[0]["name"]
-                self.state["material_valid"] = True
+                return "Let's create an Independent PO.\n\nFirst, **which Supplier** is this for? (Type name to search)"
             else:
-                self.state["step"] = "validating_material"
-                self.state["material_options"] = materials
-                options = "\n".join([f"{i+1}. {m['name']}" for i, m in enumerate(materials)])
-                return f"I found multiple materials. Please choose one:\n{options}"
-
-        # 3.5 Delivery Date Validation
-        if not self.state.get("date_valid"):
-            date_str = data.get("delivery_date")
-            if not date_str:
-                # Default to 7 days from now
-                date_str = (datetime.datetime.now() + datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+                # Fallback to Q&A
+                return self.sql_agent.answer_question(user_input)
             
+        elif step == "header_supplier":
+            return self._handle_selection(
+                user_input, 
+                self.tools.search_suppliers, 
+                "header", "supplier", 
+                "header_type", 
+                "Selected: **{name}**\n\nWhat is the **PO Type**? (Standard / Service)"
+            )
+
+        elif step == "header_type":
+            # Accept all 8 PO types from SupplierX
+            valid_types = ["Asset", "Service", "Regular Purchase", "Internal Order Material", 
+                          "Internal Order Service", "Network", "Network Service", "Cost Center Material"]
+            
+            po_type = user_input.title()
+            if po_type not in valid_types:
+                return f"Please choose one of: {', '.join(valid_types)}"
+            
+            self.state["header"]["po_type"] = po_type
+            self.state["step"] = "header_currency"
+            return "What **Currency** should be used? (e.g., INR, USD)"
+
+        elif step == "header_currency":
+            self.state["header"]["currency"] = user_input.upper()
+            self.state["header"]["validity_date"] = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+            self.state["step"] = "org_plant"
+            return f"Currency set to **{user_input.upper()}**.\n\nNow, which **Plant** is this for?"
+
+        # --- STEP 2: ORG DATA ---
+        elif step == "org_plant":
+            return self._handle_selection(
+                user_input,
+                self.tools.search_plants,
+                "org_data", "plant",
+                "org_purch_org",
+                "Selected Plant: **{name}**\n\nSelect **Purchase Organization**:"
+            )
+
+        elif step == "org_purch_org":
+            return self._handle_selection(
+                user_input,
+                self.tools.search_purchase_orgs,
+                "org_data", "purchase_org",
+                "org_purch_group",
+                "Selected Org: **{name}**\n\nSelect **Purchase Group**:"
+            )
+
+        elif step == "org_purch_group":
+            return self._handle_selection(
+                user_input,
+                self.tools.search_purchase_groups,
+                "org_data", "purchase_group",
+                "optional_fields",
+                "Org Data saved.\n\nDo you want to add **optional fields** (Projects, Payment Terms, Inco Terms)? Type 'yes' or 'skip'."
+            )
+
+        # --- STEP 2.5: OPTIONAL FIELDS ---
+        elif step == "optional_fields":
+            if "skip" in user_input.lower():
+                self.state["step"] = "item_material"
+                return "--- Line Item 1 ---\n\nWhat **Material/Service** do you want to add?"
+            elif "yes" in user_input.lower():
+                self.state["step"] = "optional_project"
+                return "Enter **Project Name** (or type 'skip'):"
+            else:
+                return "Please type 'yes' to add optional fields or 'skip' to continue."
+
+        elif step == "optional_project":
+            if "skip" not in user_input.lower():
+                self.state["optional"] = {"project": user_input}
+            self.state["step"] = "optional_payment"
+            return "Enter **Payment Term** (or type 'skip'):"
+
+        elif step == "optional_payment":
+            if "skip" not in user_input.lower():
+                if "optional" not in self.state:
+                    self.state["optional"] = {}
+                self.state["optional"]["payment_term"] = user_input
+            self.state["step"] = "optional_inco"
+            return "Enter **Inco Term** (or type 'skip'):"
+
+        elif step == "optional_inco":
+            if "skip" not in user_input.lower():
+                if "optional" not in self.state:
+                    self.state["optional"] = {}
+                self.state["optional"]["inco_term"] = user_input
+            self.state["step"] = "item_material"
+            return "--- Line Item 1 ---\n\nWhat **Material/Service** do you want to add?"
+
+        # --- STEP 3: LINE ITEMS ---
+        elif step == "item_material":
+            # Check if we have pre-filled details from start
+            if "initial_details" in self.state and not user_input:
+                user_input = self.state.pop("initial_details") # Use and remove
+            
+            # Custom handling for material to store in current_item
+            materials = self.tools.search_materials(user_input)
+            if not materials:
+                return f"I couldn't find any material matching '{user_input}'. Try 'MS Pipe' or 'Steel'."
+            
+            # Try exact match first (case-insensitive)
+            selected = next((m for m in materials if m['name'].lower() == user_input.lower()), None)
+            
+            # If no exact match, check partial matches
+            if not selected:
+                partial_matches = [m for m in materials if user_input.lower() in m['name'].lower()]
+                if len(partial_matches) == 1:
+                    selected = partial_matches[0]
+            
+            # If still no match but only 1 result total, auto-select
+            if not selected and len(materials) == 1:
+                selected = materials[0]
+            
+            if selected:
+                self.state["current_item"]["material"] = selected
+                self.state["step"] = "item_qty"
+                return f"Selected: **{selected['name']}**\n\nEnter **Quantity**:"
+            else:
+                # Multiple matches - frontend will show buttons
+                return f"I found multiple matches for '{user_input}'. Please select one."
+
+        elif step == "item_qty":
             try:
-                # Validate format
-                d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-                # Business Rule: Date cannot be in past
-                if d < datetime.datetime.now():
-                    self.state["step"] = "validating_date"
-                    return "Delivery date cannot be in the past. Please enter a future date (YYYY-MM-DD)."
+                qty = float(user_input)
+                self.state["current_item"]["quantity"] = qty
+                self.state["step"] = "item_price"
+                return "Enter **Unit Price**:"
+            except:
+                return "Please enter a valid number."
+
+        elif step == "item_price":
+            try:
+                price = float(user_input)
+                item = self.state["current_item"]
+                item["price"] = price
+                item["total"] = item["quantity"] * price
                 
-                self.state["final_payload"]["delivery_date"] = date_str
-                self.state["date_valid"] = True
-            except ValueError:
-                self.state["step"] = "validating_date"
-                return "Invalid date format. Please use YYYY-MM-DD."
+                # Add to list
+                self.state["line_items"].append(item)
+                self.state["current_item"] = {} # Reset
+                
+                self.state["step"] = "add_more_check"
+                return f"Item added! Total: {item['total']}\n\nDo you want to **add another item**? (yes/no)"
+            except:
+                return "Please enter a valid price."
 
-        # Price fallback
-        if not data.get("price"):
-            self.state["final_payload"]["price"] = 100.0 # Mock default
-        else:
-             self.state["final_payload"]["price"] = data["price"]
+        elif step == "add_more_check":
+            if "yes" in user_input.lower():
+                self.state["step"] = "item_material"
+                return f"--- Line Item {len(self.state['line_items']) + 1} ---\n\nWhat **Material**?"
+            else:
+                self.state["step"] = "remarks"
+                return "Any **Remarks** for this PO? (or type 'skip')"
 
-        # Quantity fallback
-        if not data.get("quantity"):
-             self.state["final_payload"]["quantity"] = 10 # Mock default
-        else:
-             self.state["final_payload"]["quantity"] = data["quantity"]
+        # --- STEP 3.5: REMARKS ---
+        elif step == "remarks":
+            if "skip" not in user_input.lower():
+                self.state["remarks"] = user_input
+            self.state["step"] = "confirm"
+            return self._generate_summary()
 
-        # Calculate Total
-        self.state["final_payload"]["total"] = float(self.state["final_payload"]["quantity"]) * float(self.state["final_payload"]["price"])
+        # --- STEP 4: CONFIRM ---
+        elif step == "confirm":
+            if "yes" in user_input.lower() or "create" in user_input.lower():
+                # Save to DB
+                optional = self.state.get("optional", {})
+                po_data = {
+                    "po_date": self.state["header"]["po_date"],
+                    "validity_date": self.state["header"]["validity_date"],
+                    "po_type": self.state["header"]["po_type"],
+                    "supplier_id": self.state["header"]["supplier"]["id"],
+                    "supplier_name": self.state["header"]["supplier"]["name"],
+                    "currency": self.state["header"]["currency"],
+                    "purchase_org_id": self.state["org_data"]["purchase_org"]["id"],
+                    "purchase_org_code": self.state["org_data"]["purchase_org"].get("code"),
+                    "plant_id": self.state["org_data"]["plant"]["id"],
+                    "plant_code": self.state["org_data"]["plant"].get("code", "P01"),
+                    "purchase_group_id": self.state["org_data"]["purchase_group"]["id"],
+                    "purchase_group_code": self.state["org_data"]["purchase_group"].get("code"),
+                    "project_name": optional.get("project"),
+                    "payment_term_code": optional.get("payment_term"),
+                    "inco_term_code": optional.get("inco_term"),
+                    "remarks": self.state.get("remarks"),
+                    "line_items": self.state["line_items"],
+                    "total_amount": sum(i["total"] for i in self.state["line_items"])
+                }
+                
+                po_number = self.tools.create_independent_po(po_data)
+                
+                self.state["step"] = "start" # Reset
+                return f"🎉 **Independent PO Created!**\nPO Number: `{po_number}`\n\nType 'start' to create another."
+            else:
+                return "Cancelled. Type 'start' to start over."
 
-        # All valid, move to confirmation
-        self.state["step"] = "confirmation"
-        return self._build_confirmation_msg()
+        return "I didn't understand. Please try again."
 
-    def _handle_supplier_selection(self, user_input: str) -> str:
-        if user_input.isdigit():
-            idx = int(user_input) - 1
-            options = self.state["supplier_options"]
-            if 0 <= idx < len(options):
-                self.state["final_payload"]["supplier_id"] = options[idx]["id"]
-                self.state["final_payload"]["supplier_name"] = options[idx]["name"]
-                self.state["supplier_valid"] = True
-                self.state["step"] = "start" # Return to main loop to continue validation
-                return self._step_validation()
-        return "Invalid selection. Please choose a number."
-
-    def _handle_plant_selection(self, user_input: str) -> str:
-        if user_input.isdigit():
-            idx = int(user_input) - 1
-            options = self.state["plant_options"]
-            if 0 <= idx < len(options):
-                self.state["final_payload"]["plant_id"] = options[idx]["id"]
-                self.state["final_payload"]["plant_name"] = options[idx]["name"]
-                self.state["plant_valid"] = True
-                self.state["step"] = "start"
-                return self._step_validation()
-        return "Invalid selection. Please choose a number."
-
-    def _handle_material_selection(self, user_input: str) -> str:
-        if user_input.isdigit():
-            idx = int(user_input) - 1
-            options = self.state["material_options"]
-            if 0 <= idx < len(options):
-                self.state["final_payload"]["material_name"] = options[idx]["name"]
-                self.state["material_valid"] = True
-                self.state["step"] = "start"
-                return self._step_validation()
-        return "Invalid selection. Please choose a number."
-
-    def _handle_date_correction(self, user_input: str) -> str:
-        self.state["extracted_data"]["delivery_date"] = user_input.strip()
-        self.state["step"] = "start"
-        return self._step_validation()
-
-    def _build_confirmation_msg(self) -> str:
-        p = self.state["final_payload"]
-        return f"""
-        All set! Here is the PO details:
+    def _handle_selection(self, user_input, search_func, state_category, state_key, next_step, success_msg):
+        """Helper to handle search-and-select logic"""
+        results = search_func(user_input)
         
-        Supplier: {p['supplier_name']}
-        Plant: {p['plant_name']}
-        Material: {p['material_name']}
-        Quantity: {p['quantity']}
-        Price: {p['price']}
-        Total: {p['total']}
-        Delivery: {p['delivery_date']}
+        if not results:
+            return f"I couldn't find any match for '{user_input}'. Please try again."
         
-        Type 'yes' to create this PO.
-        """
-
-    def _handle_confirmation(self, user_input: str) -> str:
-        if user_input.lower() in ['yes', 'y', 'confirm']:
-            po_number = self.tools.create_po(self.state["final_payload"])
+        # Try exact match first (case-insensitive)
+        selected = next((r for r in results if r['name'].lower() == user_input.lower()), None)
+        
+        # If no exact match, check partial matches
+        if not selected:
+            partial_matches = [r for r in results if user_input.lower() in r['name'].lower()]
+            if len(partial_matches) == 1:
+                selected = partial_matches[0]
+        
+        # If still no match but only 1 result total, auto-select
+        if not selected and len(results) == 1:
+            selected = results[0]
             
-            # Reset
-            self.state = {
-                "step": "start",
-                "extracted_data": {},
-                "validation_status": {},
-                "final_payload": {}
-            }
-            
-            return f"🎉 PO Created Successfully! PO Number: {po_number}"
+        if selected:
+            self.state[state_category][state_key] = selected
+            self.state["step"] = next_step
+            return success_msg.format(name=selected['name'])
         else:
-            return "Cancelled. Type a new request to start over."
+            # Multiple matches - frontend will show buttons
+            return f"I found multiple matches for '{user_input}'. Please select one."
+
+    def _generate_summary(self) -> str:
+        h = self.state["header"]
+        o = self.state["org_data"]
+        items = self.state["line_items"]
+        total = sum(i["total"] for i in items)
+        
+        summary = f"""**📋 Final PO Review**
+
+**Header Details:**
+- **Supplier:** {h['supplier']['name']}
+- **Type:** {h['po_type']}
+- **Currency:** {h['currency']}
+- **PO Date:** {h['po_date']}
+- **Validity:** {h['validity_date']}
+
+**Organization Data:**
+- **Plant:** {o['plant']['name']}
+- **Purch Org:** {o['purchase_org']['name']} ({o['purchase_org'].get('code', 'N/A')})
+- **Purch Group:** {o['purchase_group']['name']} ({o['purchase_group'].get('code', 'N/A')})
+
+**Line Items:**
+"""
+        for idx, i in enumerate(items, 1):
+            summary += f"{idx}. **{i['material']['name']}**\n   Qty: {i['quantity']} | Price: {i['price']} | Total: {i['total']}\n"
+            
+        summary += f"\n**💰 Grand Total: {total} {h['currency']}**\n\nEverything looks good? Type **'Yes'** to create PO."""
+        return summary
+
+    def _get_current_step_prompt(self) -> str:
+        """Helper to get the prompt for the current step without processing input"""
+        step = self.state["step"]
+        
+        if step == "header_supplier":
+            return "First, **which Supplier** is this for? (Type name to search)"
+        elif step == "header_type":
+            return "Selected: **{name}**\n\nWhat is the **PO Type**? (Standard / Service)".format(name=self.state["header"]["supplier"]["name"])
+        elif step == "header_currency":
+            return "What **Currency** should be used? (e.g., INR, USD)"
+        elif step == "org_plant":
+            return f"Currency set to **{self.state['header']['currency']}**.\n\nNow, which **Plant** is this for?"
+        elif step == "org_purch_org":
+            return "Select **Purchase Organization**:"
+        elif step == "org_purch_group":
+            return "Select **Purchase Group**:"
+        elif step == "optional_fields":
+            return "Org Data saved.\n\nDo you want to add **optional fields** (Projects, Payment Terms, Inco Terms)? Type 'yes' or 'skip'."
+        elif step == "optional_project":
+            return "Enter **Project Name** (or type 'skip'):"
+        elif step == "optional_payment":
+            return "Enter **Payment Term** (or type 'skip'):"
+        elif step == "optional_inco":
+            return "Enter **Inco Term** (or type 'skip'):"
+        elif step == "item_material":
+            return f"--- Line Item {len(self.state['line_items']) + 1} ---\n\nWhat **Material/Service** do you want to add?"
+        elif step == "item_qty":
+            return f"Selected: **{self.state['current_item']['material']['name']}**\n\nEnter **Quantity**:"
+        elif step == "item_price":
+            return "Enter **Unit Price**:"
+        elif step == "add_more_check":
+            return f"Item added! Total: {self.state['current_item'].get('total', 0)}\n\nDo you want to **add another item**? (yes/no)"
+        elif step == "remarks":
+            return "Any **Remarks** for this PO? (or type 'skip')"
+        elif step == "confirm":
+            return self._generate_summary()
+            
+        return "How can I help you?"

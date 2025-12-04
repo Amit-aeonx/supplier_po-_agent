@@ -79,30 +79,147 @@ class POTools:
     @staticmethod
     def search_materials(query_str: str) -> List[Dict]:
         """Search materials by name"""
-        query = """
-        SELECT id, material_name, material_code, base_unit
-        FROM materials
-        WHERE material_name LIKE :search
-        LIMIT 5
-        """
+        if not query_str:
+            query = "SELECT id, name, code, price FROM materials LIMIT 5"
+            params = {}
+        else:
+            query = """
+            SELECT id, name, code, price
+            FROM materials 
+            WHERE name LIKE :search OR code LIKE :search 
+            LIMIT 5
+            """
+            params = {"search": f"%{query_str}%"}
+            
         try:
             with engine.connect() as conn:
-                result = conn.execute(text(query), {"search": f"%{query_str}%"})
+                result = conn.execute(text(query), params)
                 return [{
                     "id": row[0],
                     "name": row[1],
                     "code": row[2],
-                    "unit": row[3]
+                    "price": row[3] or 0
                 } for row in result]
         except Exception as e:
             print(f"[WARN] search_materials failed (using mock): {e}")
             # Mock fallback
             mock_materials = [
-                {"id": 1, "name": "MS Pipe", "code": "M01", "unit": "M"},
-                {"id": 2, "name": "Steel Rod", "code": "M02", "unit": "KG"},
-                {"id": 3, "name": "Cement", "code": "M03", "unit": "BAG"}
+                {"id": 1, "name": "MS Pipe", "code": "M01", "price": 100},
+                {"id": 2, "name": "Steel Rod", "code": "M02", "price": 200},
+                {"id": 3, "name": "Cement", "code": "M03", "price": 300}
             ]
             return [m for m in mock_materials if query_str.lower() in m['name'].lower()]
+
+    @staticmethod
+    def search_purchase_orgs(query_str: str = "") -> List[Dict]:
+        """Search purchase organizations"""
+        if not query_str:
+            query = "SELECT id, code, description FROM purchase_organization LIMIT 5"
+            params = {}
+        else:
+            query = "SELECT id, code, description FROM purchase_organization WHERE description LIKE :search OR code LIKE :search LIMIT 5"
+            params = {"search": f"%{query_str}%"}
+            
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(query), params)
+                return [{"id": row[0], "code": row[1], "name": row[2]} for row in result]
+        except Exception as e:
+            print(f"[ERROR] search_purchase_orgs: {e}")
+            return []
+
+    @staticmethod
+    def search_purchase_groups(query_str: str = "") -> List[Dict]:
+        """Search purchase groups"""
+        if not query_str:
+            query = "SELECT id, code, name FROM purchase_groups LIMIT 5"
+            params = {}
+        else:
+            query = "SELECT id, code, name FROM purchase_groups WHERE name LIKE :search OR code LIKE :search LIMIT 5"
+            params = {"search": f"%{query_str}%"}
+            
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(query), params)
+                return [{"id": row[0], "code": row[1], "name": row[2]} for row in result]
+        except Exception as e:
+            print(f"[ERROR] search_purchase_groups: {e}")
+            return []
+
+    @staticmethod
+    def get_payment_terms() -> List[Dict]:
+        """Fetch payment terms"""
+        query = "SELECT id, code, name FROM payment_terms LIMIT 5"
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(query))
+                return [{"id": row[0], "code": row[1], "name": row[2]} for row in result]
+        except Exception as e:
+            print(f"[ERROR] get_payment_terms: {e}")
+            return []
+            
+    @staticmethod
+    def get_currencies() -> List[Dict]:
+        """Fetch currencies"""
+        query = "SELECT id, code, name FROM currencies LIMIT 5"
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(query))
+                return [{"id": row[0], "code": row[1], "name": row[2]} for row in result]
+        except Exception as e:
+            print(f"[ERROR] get_currencies: {e}")
+            return []
+
+    @staticmethod
+    def create_independent_po(po_data: Dict) -> str:
+        """Create independent purchase order"""
+        import json
+        import random
+        
+        po_number = f"IND-PO-{random.randint(10000, 99999)}"
+        
+        query = """
+        INSERT INTO independent_purchase_orders (
+            po_number, po_date, validity_date, po_type, 
+            supplier_id, supplier_name, currency,
+            purchase_org_id, purchase_org_code,
+            plant_id, plant_code,
+            purchase_group_id, purchase_group_code,
+            line_items, total_amount, status
+        ) VALUES (
+            :po_number, :po_date, :validity_date, :po_type,
+            :supplier_id, :supplier_name, :currency,
+            :purchase_org_id, :purchase_org_code,
+            :plant_id, :plant_code,
+            :purchase_group_id, :purchase_group_code,
+            :line_items, :total_amount, 'Created'
+        )
+        """
+        
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(query), {
+                    "po_number": po_number,
+                    "po_date": po_data.get("po_date"),
+                    "validity_date": po_data.get("validity_date"),
+                    "po_type": po_data.get("po_type", "Standard"),
+                    "supplier_id": po_data.get("supplier_id"),
+                    "supplier_name": po_data.get("supplier_name"),
+                    "currency": po_data.get("currency", "INR"),
+                    "purchase_org_id": po_data.get("purchase_org_id"),
+                    "purchase_org_code": po_data.get("purchase_org_code"),
+                    "plant_id": po_data.get("plant_id"),
+                    "plant_code": po_data.get("plant_code"),
+                    "purchase_group_id": po_data.get("purchase_group_id"),
+                    "purchase_group_code": po_data.get("purchase_group_code"),
+                    "line_items": json.dumps(po_data.get("line_items", []), default=str),
+                    "total_amount": po_data.get("total_amount", 0.0)
+                })
+                conn.commit()
+                return po_number
+        except Exception as e:
+            print(f"[ERROR] create_independent_po: {e}")
+            return f"ERROR-{e}"
 
     @staticmethod
     def create_po(po_data: Dict) -> str:
