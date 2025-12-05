@@ -123,6 +123,11 @@ if query:
     # Review & Edit Mode
     if st.session_state.get("review_mode") and st.session_state.get("selected_rec"):
         rec = st.session_state.selected_rec
+        
+        # Fetch Options
+        po_types = st.session_state.smart_agent.get_po_types()
+        org_options = st.session_state.smart_agent.get_org_options()
+        
         st.markdown("## 📝 Edit & Confirm Purchase Order")
         
         with st.form("po_review_form"):
@@ -132,6 +137,22 @@ if query:
                 st.subheader("Supplier Details")
                 st.text_input("Supplier Name", value=rec['supplier']['name'], disabled=True)
                 st.text_input("Supplier ID", value=rec['supplier']['id'], disabled=True)
+                
+                st.subheader("Org Data")
+                # PO Type
+                selected_type = st.selectbox("PO Type", po_types, index=po_types.index("Regular Purchase") if "Regular Purchase" in po_types else 0)
+                
+                # Purchase Org
+                orgs = org_options['orgs']
+                org_labels = [f"{o['code']} - {o['name']}" for o in orgs]
+                selected_org_idx = st.selectbox("Purchase Org", range(len(orgs)), format_func=lambda i: org_labels[i])
+                selected_org = orgs[selected_org_idx] if orgs else None
+                
+                # Purchase Group
+                groups = org_options['groups']
+                group_labels = [f"{g['code']} - {g['name']}" for g in groups]
+                selected_group_idx = st.selectbox("Purchase Group", range(len(groups)), format_func=lambda i: group_labels[i])
+                selected_group = groups[selected_group_idx] if groups else None
                 
             with col2:
                 st.subheader("Item Details")
@@ -149,15 +170,15 @@ if query:
             total_val = new_qty * new_price
             
             # Draft Preview
-            st.markdown("### � Draft PO Preview")
+            st.markdown("### 📄 Draft PO Preview")
             st.info(f"""
             **PO Summary:**
+            - **Type:** {selected_type}
+            - **Org:** {selected_org['code'] if selected_org else 'N/A'} | **Group:** {selected_group['code'] if selected_group else 'N/A'}
             - **Supplier:** {rec['supplier']['name']}
             - **Item:** {rec['material']['name']}
             - **Quantity:** {new_qty}
-            - **Unit Price:** INR {new_price:,.2f}
             - **Total Value:** INR {total_val:,.2f}
-            - **Delivery Date:** {new_date.strftime('%Y-%m-%d')}
             """)
             
             c1, c2 = st.columns([1, 4])
@@ -172,7 +193,12 @@ if query:
                 rec['delivery_days'] = (new_date - datetime.now().date()).days
                 
                 with st.spinner("Creating Purchase Order..."):
-                    result = st.session_state.smart_agent.create_po(rec, new_qty)
+                    result = st.session_state.smart_agent.create_po(
+                        rec, new_qty, 
+                        po_type=selected_type,
+                        purch_org=selected_org,
+                        purch_group=selected_group
+                    )
                     st.session_state.po_result = result
                     st.session_state.review_mode = False
                     st.rerun()
@@ -192,10 +218,14 @@ if "po_result" in st.session_state:
     st.markdown("### 📄 PO Summary")
     
     # Header Info
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("PO Number", details['po_number'])
     c2.metric("Date", details['created_at'].split(" ")[0])
-    c3.metric("Status", "Created")
+    c3.metric("Type", details['org_data']['po_type'])
+    c4.metric("Status", "Created")
+    
+    # Org Info
+    st.caption(f"Org: {details['org_data']['org_code']} | Group: {details['org_data']['group_code']}")
     
     # Supplier Info
     st.markdown("#### Supplier")

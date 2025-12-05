@@ -169,25 +169,44 @@ class SmartPOAgent:
         
         return recommendations[:3] # Return top 3 options
 
-    def create_po(self, recommendation, quantity):
+    def get_po_types(self):
+        """Returns list of valid PO Types"""
+        return ["Asset", "Service", "Regular Purchase", "Internal Order Material", 
+                "Internal Order Service", "Network", "Network Service", "Cost Center Material"]
+
+    def get_org_options(self):
+        """Fetches available Org and Group options"""
+        return {
+            "orgs": self.tools.search_purchase_orgs(""),
+            "groups": self.tools.search_purchase_groups("")
+        }
+
+    def create_po(self, recommendation, quantity, po_type="Standard", purch_org=None, purch_group=None):
         """
         Creates a PO in the database and returns the details.
         """
         total_value = recommendation['price'] * quantity
         po_number = f"IND-PO-{random.randint(10000, 99999)}"
         
-        # Get default Org Data (since we are automating, we pick defaults)
-        # In a real app, these might be inferred from user context or defaults
+        # Get default Org Data if not provided
         try:
             with engine.connect() as conn:
-                # Fetch first available Plant, Purch Org, Group
+                # Fetch first available Plant if needed (we still default plant for now as user didn't ask to change it)
                 plant = conn.execute(text("SELECT id, code FROM plants LIMIT 1")).fetchone()
-                p_org = conn.execute(text("SELECT id, code FROM purchase_organization LIMIT 1")).fetchone()
-                p_group = conn.execute(text("SELECT id, code FROM purchase_groups LIMIT 1")).fetchone()
-                
                 plant_id, plant_code = (None, plant[1]) if plant else (None, "PL01")
-                org_id, org_code = (p_org[0], p_org[1]) if p_org else (None, "1000")
-                group_id, group_code = (p_group[0], p_group[1]) if p_group else (None, "001")
+                
+                # Handle Org and Group
+                if purch_org:
+                    org_id, org_code = purch_org['id'], purch_org['code']
+                else:
+                    p_org = conn.execute(text("SELECT id, code FROM purchase_organization LIMIT 1")).fetchone()
+                    org_id, org_code = (p_org[0], p_org[1]) if p_org else (None, "1000")
+                
+                if purch_group:
+                    group_id, group_code = purch_group['id'], purch_group['code']
+                else:
+                    p_group = conn.execute(text("SELECT id, code FROM purchase_groups LIMIT 1")).fetchone()
+                    group_id, group_code = (p_group[0], p_group[1]) if p_group else (None, "001")
                 
                 # Prepare Line Items JSON
                 line_items = [
@@ -223,7 +242,7 @@ class SmartPOAgent:
                     "po_number": po_number,
                     "po_date": datetime.now().strftime("%Y-%m-%d"),
                     "validity_date": (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"),
-                    "po_type": "Standard",
+                    "po_type": po_type,
                     "supplier_id": recommendation['supplier']['id'],
                     "supplier_name": recommendation['supplier']['name'],
                     "currency": recommendation['currency'],
@@ -267,6 +286,11 @@ class SmartPOAgent:
                 "terms": {
                     "delivery_days": recommendation['delivery_days'],
                     "payment_term": "NT30" # Default
+                },
+                "org_data": {
+                    "po_type": po_type,
+                    "org_code": org_code,
+                    "group_code": group_code
                 }
             }
         }
