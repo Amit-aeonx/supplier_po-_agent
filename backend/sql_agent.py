@@ -34,7 +34,12 @@ class SQLAgent:
                     try:
                         # Get columns
                         result = conn.execute(text(f"SHOW COLUMNS FROM {t}"))
-                        cols = [f"{row[0]} ({row[1]})" for row in result]
+                        
+                        # Filter out internal/technical columns
+                        excluded = ['created_at', 'updated_at', 'isDeleted', 'tenant_id', 'modifiedBy', 
+                                   'mrp_activated', 'default_mrp_area', 'default_mrp_type']
+                        
+                        cols = [f"{row[0]} ({row[1]})" for row in result if row[0] not in excluded]
                         schema_info.append(f"Table {t}: {', '.join(cols)}")
                     except Exception as e:
                         # Skip tables that don't exist
@@ -59,9 +64,10 @@ class SQLAgent:
         2. Use only SELECT statements. No INSERT, UPDATE, DELETE.
         3. If the question cannot be answered with the schema, return "NO_QUERY".
         4. Limit results to 10 rows unless specified otherwise.
-        5. For 'supplier_details', use 'name' column for supplier name.
-        6. For 'plants', use 'name' column for plant name.
-        7. Use LIKE %...% for text searches (case insensitive).
+        5. NEVER use SELECT *. Always select specific, relevant columns (e.g., id, name, code, city, status).
+        6. For 'supplier_details', use 'name' column for supplier name.
+        7. For 'plants', use 'name' column for plant name.
+        8. Use LIKE %...% for text searches (case insensitive).
         
         User Question: "{question}"
         """
@@ -107,15 +113,21 @@ class SQLAgent:
                 if not rows:
                     return "No results found."
                 
-                # Format as a simple table string
+                # Format as a Markdown table
                 output = f"Found {len(rows)} results:\n\n"
                 
                 # Get headers from first row
                 headers = list(rows[0].keys())
                 
-                for i, row in enumerate(rows, 1):
-                    row_str = " | ".join(f"{k}: {v}" for k, v in row.items())
-                    output += f"{i}. {row_str}\n"
+                # Create Markdown table header
+                header_row = "| " + " | ".join(headers) + " |"
+                separator_row = "| " + " | ".join(["---"] * len(headers)) + " |"
+                output += f"{header_row}\n{separator_row}\n"
+                
+                # Create table body
+                for row in rows:
+                    row_values = [str(row.get(h, "")) for h in headers]
+                    output += "| " + " | ".join(row_values) + " |\n"
                     
                 return output
                 
@@ -129,4 +141,4 @@ class SQLAgent:
             return "I couldn't generate a query for that. Please try asking differently."
         
         print(f"[DEBUG] Generated SQL: {sql}")
-        return f"**Query:** `{sql}`\n\n" + self.run_query(sql)
+        return self.run_query(sql)

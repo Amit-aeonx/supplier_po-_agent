@@ -34,7 +34,7 @@ class POTools:
         SELECT id, supplier_name, emailID
         FROM supplier_details
         WHERE supplier_name LIKE :search
-        LIMIT 5
+        LIMIT 50
         """
         try:
             with engine.connect() as conn:
@@ -56,7 +56,7 @@ class POTools:
         SELECT id, plant_name, plant_code
         FROM plants
         WHERE plant_name LIKE :search
-        LIMIT 5
+        LIMIT 50
         """
         try:
             with engine.connect() as conn:
@@ -80,14 +80,14 @@ class POTools:
     def search_materials(query_str: str) -> List[Dict]:
         """Search materials by name"""
         if not query_str:
-            query = "SELECT id, name, code, price FROM materials LIMIT 5"
+            query = "SELECT id, name, code, price FROM materials LIMIT 50"
             params = {}
         else:
             query = """
             SELECT id, name, code, price
             FROM materials 
             WHERE name LIKE :search OR code LIKE :search 
-            LIMIT 5
+            LIMIT 50
             """
             params = {"search": f"%{query_str}%"}
             
@@ -114,10 +114,10 @@ class POTools:
     def search_purchase_orgs(query_str: str = "") -> List[Dict]:
         """Search purchase organizations"""
         if not query_str:
-            query = "SELECT id, code, description FROM purchase_organization LIMIT 5"
+            query = "SELECT id, code, description FROM purchase_organization LIMIT 50"
             params = {}
         else:
-            query = "SELECT id, code, description FROM purchase_organization WHERE description LIKE :search OR code LIKE :search LIMIT 5"
+            query = "SELECT id, code, description FROM purchase_organization WHERE description LIKE :search OR code LIKE :search LIMIT 50"
             params = {"search": f"%{query_str}%"}
             
         try:
@@ -132,10 +132,10 @@ class POTools:
     def search_purchase_groups(query_str: str = "") -> List[Dict]:
         """Search purchase groups"""
         if not query_str:
-            query = "SELECT id, code, name FROM purchase_groups LIMIT 5"
+            query = "SELECT id, code, name FROM purchase_groups LIMIT 50"
             params = {}
         else:
-            query = "SELECT id, code, name FROM purchase_groups WHERE name LIKE :search OR code LIKE :search LIMIT 5"
+            query = "SELECT id, code, name FROM purchase_groups WHERE name LIKE :search OR code LIKE :search LIMIT 50"
             params = {"search": f"%{query_str}%"}
             
         try:
@@ -161,7 +161,7 @@ class POTools:
     @staticmethod
     def get_currencies() -> List[Dict]:
         """Fetch currencies"""
-        query = "SELECT id, code, name FROM currencies LIMIT 5"
+        query = "SELECT id, code, name FROM currencies LIMIT 50"
         try:
             with engine.connect() as conn:
                 result = conn.execute(text(query))

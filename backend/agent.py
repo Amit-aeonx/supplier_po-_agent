@@ -139,7 +139,7 @@ class POAgent:
                 self.tools.search_suppliers, 
                 "header", "supplier", 
                 "header_type", 
-                "Selected: **{name}**\n\nWhat is the **PO Type**? (Standard / Service)"
+                "Selected: **{name}**\n\nSelect **PO Type**:"
             )
 
         elif step == "header_type":
@@ -392,7 +392,7 @@ class POAgent:
         if step == "header_supplier":
             return "First, **which Supplier** is this for? (Type name to search)"
         elif step == "header_type":
-            return "Selected: **{name}**\n\nWhat is the **PO Type**? (Standard / Service)".format(name=self.state["header"]["supplier"]["name"])
+            return "Selected: **{name}**\n\nSelect **PO Type**:".format(name=self.state["header"]["supplier"]["name"])
         elif step == "header_currency":
             return "What **Currency** should be used? (e.g., INR, USD)"
         elif step == "org_plant":
